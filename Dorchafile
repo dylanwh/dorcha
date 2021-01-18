@@ -1,0 +1,172 @@
+#!perl
+use Mojo::Base -strict, -signatures;
+use lib 'lib';
+use Dorcha::Syntax;
+
+my $GOARCH = 'arm64';
+my $GOVERS = '1.15.6';
+my $GO_URL = "https://dl.google.com/go/go$GOVERS.linux-$GOARCH.tar.gz";
+
+my $base = build {
+  name "base";
+  tag { sprintf 'localhost:5000/base:%s', $_->short_digest };
+  from "ubuntu:20.04";
+
+  env DEBIAN_FRONTEND => "noninteractive";
+  env TZ              => "US/Eastern";
+
+  copy 'packages', '/tmp/packages';
+  shell q{
+    apt-get update
+    apt-get upgrade -y
+    apt-get install -y $(cat /tmp/packages)
+  };
+
+  entrypoint [ "/usr/bin/fish", "-c" ];
+};
+
+my $devel = build {
+   name "devel";
+   from $base;
+   run q{ apt-get install -y cmake llvm-10-dev llvm libzmq3-dev uuid-dev clang libclang-10-dev };
+};
+
+my $dylan = jupyter_lab('dylan', '501');
+# my $spoony = jupyter_lab('spoony', '502');
+
+sub jupyter_lab ($lab_user, $lab_id) {
+  build {
+    from "golang:1.15.6" => "gophernotes";
+
+    tag { sprintf 'localhost:5000/jupyter_lab_%s:%s', $lab_user, $_->short_digest };
+
+    run 'env GO111MODULE=on go get github.com/gopherdata/gophernotes';
+    workdir '/gophernotes';
+    run
+      q{cp "$(go env GOPATH)"/pkg/mod/github.com/gopherdata/gophernotes@v0.7.1/kernel/*  "."};
+    run 'chmod +w ./kernel.json';
+    run
+      q{sed "s|gophernotes|/usr/local/bin/gophernotes|" < kernel.json.in > kernel.json};
+
+    from $base;
+
+    copy {from => 'gophernotes'}, 'gophernotes/',
+      '/usr/share/jupyter/kernels/gophernotes/';
+    copy 'jupyter_lab_config.py', '/etc/jupyter/';
+
+    shell qq{
+      curl -s $GO_URL | tar -xz -C /usr/local;
+      groupadd -g $lab_id $lab_user;
+      useradd -m -u $lab_id --shell=/usr/bin/fish -g $lab_id $lab_user
+    };
+
+    copy {from => 'gophernotes'}, '/go/bin/gophernotes',
+      '/usr/local/bin/gophernotes';
+
+    user $lab_user;
+    workdir "/home/$lab_user";
+    volume "/home/$lab_user";
+
+    env GOPATH => '/home/$lab_user/go';
+    env SHELL  => '/usr/bin/fish';
+
+    entrypoint ["jupyter"]
+  };
+}
+
+my $xeus = build {
+  from $devel;
+
+  workdir '/src';
+  shell q{
+    useradd -m builder
+    chown -Rc builder /usr/local /src
+    chmod o+rwx /src
+  };
+  user 'builder';
+
+  run 'git clone --depth=1 https://github.com/nlohmann/json nlohmann_json';
+  run 'mkdir /src/nlohmann_json/build';
+  workdir '/src/nlohmann_json/build';
+  run 'cmake .. -DJSON_BuildTests=OFF';
+  run 'make';
+  run 'make install';
+
+  workdir '/src';
+  run 'git clone --depth=1 https://github.com/xtensor-stack/xtl';
+  run 'mkdir /src/xtl/build';
+  workdir '/src/xtl/build';
+  run 'cmake ..';
+  run 'make install';
+
+  workdir '/src';
+  run 'git clone --depth=1 https://github.com/zeromq/cppzmq';
+  run 'mkdir /src/cppzmq/build';
+  workdir '/src/cppzmq/build';
+  run 'cmake -DCPPZMQ_BUILD_TESTS=OFF ..';
+  run 'make -j4 install';
+
+  workdir '/src';
+  run 'git clone --depth=1 https://github.com/jupyter-xeus/xeus';
+  run 'mkdir /src/xeus/build';
+  workdir '/src/xeus/build';
+  run
+    'cmake -D WITH_PERF_TOOL=OFF -D ZMQ_BUILD_TESTS=OFF -D ENABLE_CPACK=OFF -D CMAKE_BUILD_TYPE=Release ..';
+  run 'make';
+  run 'make install';
+
+  workdir '/src';
+  run 'git clone --depth=1 https://github.com/zeux/pugixml';
+  run 'mkdir /src/pugixml/build';
+  workdir '/src/pugixml/build';
+  run 'cmake ..';
+  run 'make';
+  run 'make install';
+
+  workdir '/src';
+  run 'git clone --depth=1 https://github.com/jupyter-xeus/xeus-cling';
+  run 'mkdir /src/xeus-cling/build';
+  workdir '/src/xeus-cling/build';
+  run 'cmake ..';
+  run 'make';
+  run 'make install';
+};
+
+
+__DATA__
+@@ packages
+autoconf
+build-essential
+curl
+emacs-nox
+fd-find
+fish
+git
+gron
+hub
+jq
+jsonnet
+libncurses-dev
+libssl-dev
+moreutils
+ncdu
+nmap
+nq
+protobuf-compiler
+pv
+python3-pip
+ripgrep
+tmux
+vim-nox
+@@ jupyter_lab_config.py
+c.ExtensionApp.open_browser = False
+c.LabServerApp.open_browser = False
+c.LabApp.open_browser = False
+c.ServerApp.allow_password_change = False
+c.ServerApp.browser = ''
+c.ServerApp.ip = '0.0.0.0'
+c.ServerApp.open_browser = False
+c.ServerApp.password = 'sha1:c0c685e071e9:9f8c921de9336a2a478b174743ea10948e4bb8b3'
+c.ServerApp.password_required = True
+c.ServerApp.quit_button = False
+c.ServerApp.token = ''
